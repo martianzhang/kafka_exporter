@@ -49,6 +49,7 @@ var (
 	topicPartitionInSyncReplicas       *prometheus.Desc
 	topicPartitionUsesPreferredReplica *prometheus.Desc
 	topicUnderReplicatedPartition      *prometheus.Desc
+	topicLogSize                       *prometheus.Desc
 	consumergroupCurrentOffset         *prometheus.Desc
 	consumergroupCurrentOffsetSum      *prometheus.Desc
 	consumergroupLag                   *prometheus.Desc
@@ -299,6 +300,7 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 	ch <- topicPartitionInSyncReplicas
 	ch <- topicPartitionUsesPreferredReplica
 	ch <- topicUnderReplicatedPartition
+	ch <- topicLogSize
 	ch <- consumergroupCurrentOffset
 	ch <- consumergroupCurrentOffsetSum
 	ch <- consumergroupLag
@@ -489,6 +491,31 @@ func (e *Exporter) collect(ch chan<- prometheus.Metric) {
 					}
 				}
 			}
+
+			// logSize
+			if e.client.Config().Version.IsAtLeast(sarama.V1_0_0_0) {
+				logDirs, err := broker.DescribeLogDirs(&sarama.DescribeLogDirsRequest{
+					DescribeTopics: []sarama.DescribeLogDirsRequestTopic{
+						{
+							Topic:        topic,
+							PartitionIDs: []int32{partition},
+						},
+					},
+				})
+				if err != nil {
+					glog.Errorf("Cannot get logDirs: %v", err)
+					return
+				}
+				for _, logDir := range logDirs.LogDirs {
+					for _, t := range logDir.Topics {
+						for _, par := range t.Partitions {
+							ch <- prometheus.MustNewConstMetric(
+								topicLogSize, prometheus.GaugeValue, float64(par.Size), topic, strconv.FormatInt(int64(partition), 10),
+							)
+						}
+					}
+				}
+			}
 		}
 	}
 
@@ -582,7 +609,7 @@ func (e *Exporter) collect(ch chan<- prometheus.Metric) {
 			)
 			offsetFetchResponse, err := broker.FetchOffset(&offsetFetchRequest)
 			if err != nil {
-				glog.Errorf("Cannot get offset of group %s: %v", group.GroupId, err)
+				glog.Errorf("Cannot get offset of group %s: broker: %s, error: %v", group.GroupId, broker.Addr(), err)
 				continue
 			}
 
@@ -863,6 +890,12 @@ func setup(
 		prometheus.BuildFQName(namespace, "consumergroup", "members"),
 		"Amount of members in a consumer group",
 		[]string{"consumergroup"}, labels,
+	)
+
+	topicLogSize = prometheus.NewDesc(
+		prometheus.BuildFQName(namespace, "topic", "log_size"),
+		"Total bytes of log size",
+		[]string{"topic", "partition"}, labels,
 	)
 
 	if logSarama {
